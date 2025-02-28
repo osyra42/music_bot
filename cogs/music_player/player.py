@@ -4,11 +4,11 @@ import yt_dlp as youtube_dl
 import asyncio
 from datetime import timedelta
 import logging
-from cogs.utils import MusicUtils
+from cogs.utils.utils import MusicUtils
 import os
 import shutil
 import random
-from .controls import MusicControls
+from cogs.music_controls.controls import MusicControls
 
 logger = logging.getLogger("disnake")
 
@@ -70,29 +70,37 @@ class MusicPlayer(commands.Cog):
     def create_media_embed(self, title, description, color=disnake.Color.blurple()):
         """Create a visually appealing embed for the media player."""
         try:
-            embed = disnake.Embed(
-                title=title,
-                description=description,
-                color=color,
-            )
-            
+            embed = disnake.Embed(title=title, description=description, color=color)
+
             # Read the content from signature.txt
-            with open('signature.txt', 'r') as file:
-                signature_text = file.read().strip()
+            try:
+                with open('signature.txt', 'r') as file:
+                    signature_text = file.read().strip()
+                embed.set_footer(text=signature_text)
+            except FileNotFoundError:
+                logger.warning("signature.txt not found, skipping footer.")
+            except Exception as e:
+                logger.error(f"Error reading signature.txt: {e}", exc_info=True)
 
-            # Use the text from signature.txt in the embed footer
-            embed.set_footer(text=signature_text)
-            embed.set_image(url=self.current_song.thumbnail if self.current_song else "https://burgerbytestudio.com/favicon.png")
-            
-            
-
+            embed.set_image(url=self.current_song.thumbnail if self.current_song
+                            else "https://burgerbytestudio.com/favicon.png")
             return embed
         except Exception as e:
             logger.error(f"An error occurred: {e}", exc_info=True)
-            return disnake.Embed(title="Error", description=f"An error occurred: {str(e)}", color=disnake.Color.red())
+            return disnake.Embed(title="Error", description=f"An error occurred: {str(e)}",
+                                 color=disnake.Color.red())
 
     def create_progress_bar(self, total_duration: int, current_time: int) -> str:
-        """Create a text-based progress bar with gradient color change."""
+        """
+        Create a text-based progress bar with gradient color change.
+
+        Args:
+            total_duration (int): The total duration of the song in seconds.
+            current_time (int): The current playback time in seconds.
+
+        Returns:
+            str: A string representing the progress bar.
+        """
         try:
             progress = int((current_time / total_duration) * 20)  # 20 characters for the progress bar
             gradient = int((current_time / total_duration) * 255)  # Gradient from green to red
@@ -112,31 +120,31 @@ class MusicPlayer(commands.Cog):
 
                 embed = self.create_media_embed(
                     "🎶 Now Playing",
-                    f"**[{self.current_song.title}]({self.current_song.url})**\n\n"  # Clickable title
-                    f"**Atrist:** {self.current_song.data.get('uploader') if self.current_song else "Unknown"}\n\n"
+                    f"**[{self.current_song.title}]({self.current_song.url})**\n\n"
+                    f"**Atrist:** {self.current_song.data.get('uploader') if self.current_song else 'Unknown'}\n\n"
                     f"**Requested by:** <@{inter.author.id}>"
                 )
                 embed.add_field(name="Progress", value=progress_bar, inline=False)
 
-                # Add queue list to the embed
-                queue_list = "\n".join([f"{i+1}. {song['title']}" for i, song in enumerate(self.queue[:10])])
+                queue_list = "\n".join([f"{i+1}. {song['title']}"
+                                        for i, song in enumerate(self.queue[:10])])
                 embed.add_field(name="Queue", value=queue_list, inline=False)
 
-                # Add "See More" option to the embed
                 if len(self.queue) > 10:
-                    embed.add_field(name="See More", value="Click to see more songs in the queue", inline=False)
+                    embed.add_field(name="See More",
+                                    value="Click to see more songs in the queue", inline=False)
 
-                # Add last two played songs to the embed
                 if len(self.last_played) >= 2:
-                    last_played_list = "\n".join([f"{i+1}. {song['title']}" for i, song in enumerate(self.last_played[-2:])])
+                    last_played_list = "\n".join([f"{i+1}. {song['title']}"
+                                             for i, song in enumerate(self.last_played[-2:])])
                     embed.add_field(name="Last Played", value=last_played_list, inline=False)
 
                 try:
                     await self.progress_message.edit(embed=embed)
                 except disnake.NotFound:
-                    break  # Stop updating if the message is deleted
+                    break
 
-                await asyncio.sleep(1)  # Update every 1 second
+                await asyncio.sleep(1)
         except Exception as e:
             logger.error(f"An error occurred: {e}", exc_info=True)
             try:
@@ -162,76 +170,71 @@ class MusicPlayer(commands.Cog):
                 # Create a media player embed
                 embed = self.create_media_embed(
                     "🎶 Now Playing",
-                    f"**[{self.current_song.title}]({self.current_song.url})**\n\n"  # Clickable title
+                    f"**[{self.current_song.title}]({self.current_song.url})**\n\n"
                     f"**Duration:** {str(timedelta(seconds=self.current_song.duration))}\n"
                     f"**Requested by:** <@{next_song['user_id']}>"
                 )
 
-                # Add a progress bar
                 progress_bar = self.create_progress_bar(self.current_song.duration, 0)
                 embed.add_field(name="Progress", value=progress_bar, inline=False)
 
-                # Add queue list to the embed
-                queue_list = "\n".join([f"{i+1}. {song.get('title', 'Unknown Title')}" for i, song in enumerate(self.queue[:10])])
+                queue_list = "\n".join([f"{i+1}. {song.get('title', 'Unknown Title')}"
+                                        for i, song in enumerate(self.queue[:10])])
                 embed.add_field(name="Queue", value=queue_list, inline=False)
 
-                # Add "See More" option to the embed
                 if len(self.queue) > 10:
                     embed.add_field(name="See More", value="Click to see more songs in the queue", inline=False)
 
-                # Add last two played songs to the embed
                 if len(self.last_played) >= 2:
-                    last_played_list = "\n".join([f"{i+1}. {song.get('title', 'Unknown Title')}" for i, song in enumerate(self.last_played[-2:])])
+                    last_played_list = "\n".join([f"{i+1}. {song.get('title', 'Unknown Title')}"
+                                             for i, song in enumerate(self.last_played[-2:])])
                     embed.add_field(name="Last Played", value=last_played_list, inline=False)
 
-                # Send the embed with music controls
-                view = MusicControls(self.bot, self.queue, self.last_played)  # Pass queue and last_played
+                view = MusicControls(self.bot, self.queue, self.last_played)
                 self.progress_message = await inter.followup.send(embed=embed, view=view)
 
-                # Start the progress update task
                 self.progress_task = self.bot.loop.create_task(self.update_progress(inter))
             else:
-                # No more songs in the queue, play a random song from the parsed playlist
                 logger.info("Attempting to parse playlist.txt...")
-                playlist = MusicUtils.parse_playlist("playlist.txt")  # Parse the playlist file
-                logger.info(f"Playlist parsed: {len(playlist['default'])} URLs found in the playlist.")
+                try:
+                    playlist = MusicUtils.parse_playlist("playlist.txt")
+                    logger.info(f"Playlist parsed: {len(playlist['default'])} URLs found.")
 
-                if playlist:
-                    # Flatten the playlist into a list of URLs
+                    if not playlist:
+                        logger.warning("The playlist is empty.")
+                        await inter.followup.send("The playlist is empty.")
+                        return
+
                     all_songs = []
                     for section, songs in playlist.items():
                         all_songs.extend(songs)
 
-                    # Shuffle the playlist if it's not already shuffled
                     if not self.playlist:
                         self.playlist = all_songs
                         random.shuffle(self.playlist)
-                        self.played_songs = []  # Reset played songs when shuffling
+                        self.played_songs = []
 
-                    if self.playlist:
-                        # Play the next song in the shuffled playlist
-                        next_song = self.playlist.pop(0)  # Remove the played song from the playlist
-                        self.played_songs.append(next_song)  # Add the song to the played songs list
-
-                        # Check if all songs have been played
-                        if len(self.played_songs) == len(all_songs):
-                            logger.info("All songs have been played, reshuffling playlist.")
-                            self.playlist = all_songs.copy()
-                            random.shuffle(self.playlist)
-                            self.played_songs = []  # Reset played songs
-
-                        logger.info(f"Selected next song: {next_song}")
-                        self.queue.append({"url": next_song['url'], "user_id": self.bot.user.id})
-                        await self.play_next_song(inter)
-                    else:
+                    if not self.playlist:
                         logger.warning("No songs available in the playlist.")
                         await inter.followup.send("No songs available in the playlist.")
-                else:
-                    logger.warning("The playlist is empty.")
-                    await inter.followup.send("The playlist is empty.")
-        except FileNotFoundError:
-            logger.error("The playlist file (playlist.txt) was not found.")
-            await inter.followup.send("The playlist file (playlist.txt) was not found.")
+                        return
+
+                    next_song = self.playlist.pop(0)
+                    self.played_songs.append(next_song)
+
+                    if len(self.played_songs) == len(all_songs):
+                        logger.info("All songs have been played, reshuffling playlist.")
+                        self.playlist = all_songs.copy()
+                        random.shuffle(self.playlist)
+                        self.played_songs = []
+
+                    logger.info(f"Selected next song: {next_song}")
+                    self.queue.append({"url": next_song['url'], "user_id": self.bot.user.id})
+                    await self.play_next_song(inter)
+
+                except FileNotFoundError:
+                    logger.error("The playlist file (playlist.txt) was not found.")
+                    await inter.followup.send("The playlist file (playlist.txt) was not found.")
         except Exception as e:
             logger.error(f"An error occurred: {e}", exc_info=True)
             await inter.followup.send(f"An error occurred: {str(e)}")
@@ -334,7 +337,6 @@ class MusicPlayer(commands.Cog):
             view = MusicControls(self.bot, self.queue, self.last_played)  # Pass queue and last_played
             self.progress_message = await inter.followup.send(embed=embed, view=view)
 
-            # Start the progress update task
             self.progress_task = self.bot.loop.create_task(self.update_progress(inter))
         except Exception as e:
             logger.error(f"An error occurred: {e}", exc_info=True)
@@ -342,10 +344,16 @@ class MusicPlayer(commands.Cog):
 
     @commands.Cog.listener()
     async def on_voice_client_error(self, voice_client, error):
-        """Handle voice client errors."""
+        """
+        Handles voice client errors.
+
+        Args:
+            voice_client: The voice client instance.
+            error: The error that occurred.
+        """
         logger.error(f"Voice client error: {error}")
         if self.progress_task:
-            self.progress_task.cancel()  # Stop the progress update task
+            self.progress_task.cancel()
         self.current_song = None
         self.progress_message = None
         self.queue.clear()
@@ -353,9 +361,10 @@ class MusicPlayer(commands.Cog):
     @tasks.loop(hours=24)
     async def cleanup_task(self):
         """Clean up downloaded music files every 24 hours."""
-        if os.path.exists("music_pulls"):
-            shutil.rmtree("music_pulls")
-        os.makedirs("music_pulls")
+        music_pulls_dir = "music_pulls"
+        if os.path.exists(music_pulls_dir):
+            shutil.rmtree(music_pulls_dir)
+        os.makedirs(music_pulls_dir)
 
 def setup(bot):
     bot.add_cog(MusicPlayer(bot))
