@@ -4,6 +4,7 @@ import random
 import logging
 from cogs.music_player.player import MusicPlayer
 
+# When idle, the bot plays songs from its playlist.
 logger = logging.getLogger("disnake")
 
 class Autoplay(commands.Cog):

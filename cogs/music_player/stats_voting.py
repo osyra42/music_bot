@@ -70,5 +70,54 @@ class StatsVoting(commands.Cog):
         if emoji == "⚠️":
             logger.info(f"Reported song: {reaction.message.embeds[0].title} by {user.name}")
 
+    def get_song_stats(self, title: str):
+        """Retrieve the song stats."""
+        self.db_cursor.execute("""
+            SELECT played, requested, skipped, last_played FROM song_stats WHERE title = ?
+        """, (title,))
+        return self.db_cursor.fetchone()
+
+def setup(bot):
+    bot.add_cog(StatsVoting(bot))
+
+    def update_song_stats(self, title: str, requested: bool = False, skipped: bool = False):
+        """Update the song stats."""
+        self.db_cursor.execute("""
+            INSERT OR REPLACE INTO song_stats (title, played, requested, skipped, last_played)
+            VALUES (?, ?, ?, ?, ?)
+        """, (
+            title,
+            1 if requested else 0,
+            1 if skipped else 0,
+            disnake.utils.utcnow().isoformat()
+        ))
+        self.db_connection.commit()
+
+    @commands.Cog.listener()
+    async def on_reaction_add(self, reaction: disnake.Reaction, user: disnake.User):
+        """
+        Handles reaction add events for emoji voting.
+        """
+        if user.bot:
+            return
+
+        emoji = str(reaction.emoji)
+        if emoji not in ["👍", "👎", "⚠️"]:
+            return
+
+        # Store vote data in the database
+        try:
+            self.db_cursor.execute("""
+                INSERT OR IGNORE INTO votes (message_id, user_id, emoji)
+                VALUES (?, ?, ?)
+            """, (reaction.message.id, user.id, emoji))
+            self.db_connection.commit()
+        except Exception as e:
+            logger.error(f"An error occurred: {e}", exc_info=True)
+
+        # Log reports for review by server admins
+        if emoji == "⚠️":
+            logger.info(f"Reported song: {reaction.message.embeds[0].title} by {user.name}")
+
 def setup(bot):
     bot.add_cog(StatsVoting(bot))
