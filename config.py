@@ -3,9 +3,11 @@ import os
 import logging
 from rich.logging import RichHandler
 
+with open('discord_bot_token.txt', 'r') as file:
+    token = file.read().strip()
 # Replace these with your actual values
-DISCORD_BOT_TOKEN = ""
-TEST_GUILD_IDS = [1328777698746564638]
+DISCORD_BOT_TOKEN = str(token)
+TEST_GUILD_IDS = [1193901642815377468]
 LOGGING_LEVEL = logging.INFO
 
 # Configure logging

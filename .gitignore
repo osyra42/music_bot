@@ -7,3 +7,5 @@ __pycache__/
 *.tmp.*
 *.exe
 secret.py
+discord_bot_token.txt
+music_pulls/*
