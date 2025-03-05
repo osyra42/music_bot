@@ -2,9 +2,9 @@
 import disnake
 from disnake.ext import commands
 import logging
-from secret import setup_logging, TEST_GUILD_IDS
+from config import setup_logging, TEST_GUILD_IDS
 from utils.cog_manager import load_cogs
-from secret import setup_logging, TEST_GUILD_IDS, DISCORD_BOT_TOKEN
+from config import setup_logging, TEST_GUILD_IDS, DISCORD_BOT_TOKEN
 
 logger = setup_logging()
 
