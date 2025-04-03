@@ -3,10 +3,9 @@ import os
 import logging
 import json
 from rich.logging import RichHandler
+import os
 
-with open('discord_bot_token.txt', 'r') as file:
-    token = file.read().strip()
-DISCORD_BOT_TOKEN = str(token)
+DISCORD_BOT_TOKEN = os.environ.get("DISCORD_BOT_TOKEN")
 TEST_GUILD_IDS = [1328777698746564638]
 LOGGING_LEVEL = logging.INFO
 
