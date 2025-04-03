@@ -8,3 +8,5 @@ __pycache__/
 *.exe
 secret.py
 .qodo
+discord_bot_token.txt
+music_pulls/*
