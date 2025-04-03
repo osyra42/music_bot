@@ -1,3 +1,10 @@
 disnake
 yt_dlp
 rich
+gTTS
+newsapi-python
+requests
+asyncio
+aiohttp
+pydub
+feedparser
