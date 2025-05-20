@@ -20,7 +20,7 @@ if %errorlevel% neq 0 (
 
 REM Run the Python script using the Python interpreter from the virtual environment
 echo Starting Uta Yuki...
-python "%~dp0bot.py"
+python "%~dp0main.py"
 
 REM Check if the Python script ran successfully
 if %errorlevel% neq 0 (
