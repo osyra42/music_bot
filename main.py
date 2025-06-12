@@ -1,286 +1,376 @@
 import discord
-from discord.ext import commands
-import yt_dlp as youtube_dl
+from discord.ext import commands, tasks
+import yt_dlp
 import asyncio
 import random
 import csv
+import os
+import logging
+from typing import Dict, List, Optional, Any
+#from dotenv import load_dotenv
 from secret import YOUR_BOT_TOKEN_HERE
+
+logging.basicConfig(level=logging.INFO)
+
+#load_dotenv()
+#TOKEN = os.getenv("DISCORD_TOKEN")
+
+#if not TOKEN:
+#    raise ValueError("DISCORD_TOKEN environment variable not set. Please create a .env file or set it manually.")
 
 intents = discord.Intents.default()
 intents.message_content = True
+intents.voice_states = True
 bot = commands.Bot(command_prefix='!', intents=intents)
 
-# Single queue for the bot
-song_queue = asyncio.Queue()
-current_track_number = 0
+PLAYLIST_FILE = 'playlist.csv'
 
-# YouTube DL configuration
 YTDL_OPTIONS = {
     'format': 'bestaudio/best',
+    'outtmpl': '%(extractor)s-%(id)s-%(title)s.%(ext)s',
+    'restrictfilenames': True,
+    'noplaylist': True,
+    'nocheckcertificate': True,
+    'ignoreerrors': False,
+    'logtostderr': False,
     'quiet': True,
     'no_warnings': True,
     'default_search': 'ytsearch',
-    'extract_flat': True,
-    'noplaylist': True,
-    'socket_timeout': 10
+    'source_address': '0.0.0.0',
 }
 
-# FFmpeg audio options
 FFMPEG_OPTIONS = {
     'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
-    'options': '-vn'
+    'options': '-vn',
 }
 
-def strip_whitespace(row):
-    """Strip whitespace from all elements in a row"""
-    return [item.strip() if isinstance(item, str) else item for item in row]
+class MusicCog(commands.Cog):
+    def __init__(self, bot: commands.Bot):
+        self.bot = bot
+        self.guild_states: Dict[int, Dict[str, Any]] = {}
+        self.playlist_cache: List[Dict[str, str]] = self.load_playlist()
+        self.auto_disconnect.start()
 
-async def get_random_song():
-    """Get a random song from the playlist by counting rows and selecting a random one"""
-    try:
-        with open('playlist.csv', 'r', newline='', encoding='utf-8') as csvfile:
-            # Count rows (excluding header)
-            reader = csv.reader(csvfile)
-            header = next(reader)  # Skip header
-            rows = [strip_whitespace(row) for row in reader if row]  # Read and clean all rows
-            row_count = len(rows)
-            
-            if row_count <= 0:
-                return None, 0
+    def load_playlist(self) -> List[Dict[str, str]]:
+        playlist = []
+        try:
+            with open(PLAYLIST_FILE, 'r', newline='', encoding='utf-8') as file:
+                # Read the file and strip whitespace from fieldnames (column titles)
+                reader = csv.DictReader(line.strip() for line in file)  # Strip entire line first
+                reader.fieldnames = [name.strip() for name in reader.fieldnames]  # Normalize column names
                 
-            # Choose random track number
-            track_num = random.randint(1, row_count)
-            selected_row = rows[track_num - 1]
+                for i, row in enumerate(reader):
+                    # Strip whitespace from values and check if required fields exist
+                    url = row.get('url', '').strip()
+                    title = row.get('title', '').strip()
+                    artist = row.get('artist', '').strip()
+                    
+                    if url and title and artist:  # Only add if all fields are non-empty
+                        playlist.append({
+                            'url': url,
+                            'title': title,
+                            'artist': artist,
+                            'track_number': i + 1
+                        })
+                    else:
+                        logging.warning(f"Skipping incomplete row: {row}")
+                        
+            logging.info(f"Successfully loaded {len(playlist)} songs from {PLAYLIST_FILE}.")
             
-            if len(selected_row) >= 3:  # If CSV has url, title, artist
-                return {
-                    'url': selected_row[0],
-                    'title': selected_row[1],
-                    'artist': selected_row[2],
-                    'track_number': track_num
-                }, row_count
-            else:  # If just URL
-                return {
-                    'url': selected_row[0],
-                    'title': 'Unknown Track',
-                    'artist': 'Unknown Artist',
-                    'track_number': track_num
-                }, row_count
-    except Exception as e:
-        print(f"Error getting random song: {e}")
-        return None, 0
+        except FileNotFoundError:
+            logging.warning(f"{PLAYLIST_FILE} not found. Creating an empty file.")
+            with open(PLAYLIST_FILE, 'w', newline='', encoding='utf-8') as file:
+                writer = csv.writer(file)
+                writer.writerow(['url', 'title', 'artist'])
+        except Exception as e:
+            logging.error(f"Error loading playlist: {e}")
+        
+        return playlist
 
-async def get_audio_info(query, is_requested=False):
-    """Extract audio information from YouTube"""
-    if is_requested:
-        with youtube_dl.YoutubeDL(YTDL_OPTIONS) as ydl:
-            try:
+    def get_guild_state(self, guild_id: int) -> Dict[str, Any]:
+        if guild_id not in self.guild_states:
+            self.guild_states[guild_id] = {
+                'queue': asyncio.Queue(),
+                'current_song': None,
+                'is_playing': False,
+                'play_next_song_task': None,
+                'shuffled_playlist': [],
+            }
+        return self.guild_states[guild_id]
+        
+    def cog_unload(self):
+        self.auto_disconnect.cancel()
+
+    async def get_audio_info(self, query: str) -> Optional[Dict[str, Any]]:
+        try:
+            with yt_dlp.YoutubeDL(YTDL_OPTIONS) as ydl:
                 info = ydl.extract_info(query, download=False)
-                if 'entries' in info:  # Handle playlists/search results
+                if 'entries' in info:
                     info = info['entries'][0]
                 
                 return {
-                    'url': info['url'],
-                    'title': info.get('title', 'Unknown Track'),
-                    'artist': 'Unknown Artist',
-                    'is_requested': True,
-                    'track_number': 0  # 0 indicates it's a requested song, not from playlist
+                    'stream_url': info['url'],
+                    'title': info.get('title', 'Unknown Title'),
+                    'uploader': info.get('uploader', 'Unknown Artist'),
+                    'webpage_url': info.get('webpage_url', query),
+                    'is_requested': True
                 }
-            except Exception as e:
-                print(f"Error getting audio info: {e}")
-                return None
-    else:
-        # For random songs from playlist
-        song_info, total_tracks = await get_random_song()
-        if song_info:
-            song_info['total_tracks'] = total_tracks
-            song_info['is_requested'] = False
-            return song_info
-        else:
+        except Exception as e:
+            logging.error(f"Error fetching audio info for '{query}': {e}")
             return None
 
-async def play_random_song(ctx):
-    """Play a random song from playlist"""
-    audio_info = await get_audio_info("", is_requested=False)
-    
-    if not audio_info:
-        await ctx.send("⚠️ Couldn't load a random song. The playlist might be empty!")
-        return
-    
-    await song_queue.put(audio_info)
-    await play_next(ctx)
+    def get_next_shuffled_song(self, guild_id: int) -> Optional[Dict[str, Any]]:
+        if not self.playlist_cache:
+            return None
 
-async def play_next(ctx):
-    """Play the next song in queue at fixed 20% volume"""
-    if not ctx.voice_client:
-        return
+        state = self.get_guild_state(guild_id)
+        
+        if not state['shuffled_playlist']:
+            logging.info(f"Reshuffling playlist for guild {guild_id}.")
+            new_shuffled_list = self.playlist_cache.copy()
+            random.shuffle(new_shuffled_list)
+            state['shuffled_playlist'] = new_shuffled_list
 
-    if song_queue.empty():
-        await play_random_song(ctx)
-        return
+        if not state['shuffled_playlist']: # Still empty after trying to shuffle
+            return None
 
-    audio_info = await song_queue.get()
-    
-    if not audio_info:
-        await play_next(ctx)  # Silent failover
-        return
+        next_song = state['shuffled_playlist'].pop(0)
 
-    try:
-        def after_playing(error):
-            if error:
-                print(f"Playback error: {error}")
-            asyncio.run_coroutine_threadsafe(play_next(ctx), bot.loop)
+        return {
+            'stream_url': next_song['url'],
+            'title': next_song['title'],
+            'uploader': next_song['artist'],
+            'webpage_url': next_song['url'],
+            'track_number': next_song['track_number'],
+            'total_tracks': len(self.playlist_cache),
+            'is_requested': False
+        }
 
-        with youtube_dl.YoutubeDL(YTDL_OPTIONS) as ydl:
-            info = ydl.extract_info(audio_info['url'], download=False)
-            if 'entries' in info:
-                info = info['entries'][0]
-            audio_url = info['url']
+    async def play_next_song(self, ctx: commands.Context):
+        guild_id = ctx.guild.id
+        state = self.get_guild_state(guild_id)
+        
+        if state['is_playing']:
+            return
 
-        # Fixed 20% volume implementation
+        if state['queue'].empty():
+            shuffled_song = self.get_next_shuffled_song(guild_id)
+            if not shuffled_song:
+                state['is_playing'] = False
+                return
+            await state['queue'].put(shuffled_song)
+
+        state['is_playing'] = True
+        
+        try:
+            song_info = await state['queue'].get()
+        except asyncio.CancelledError:
+            state['is_playing'] = False
+            return
+            
+        state['current_song'] = song_info
+        
+        if not song_info.get('is_requested', False):
+            resolved_info = await self.get_audio_info(song_info['stream_url'])
+            if not resolved_info:
+                await ctx.send(f"⚠️ Could not resolve stream for **{song_info['title']}**. Skipping.")
+                state['is_playing'] = False
+                state['play_next_song_task'] = self.bot.loop.create_task(self.play_next_song(ctx))
+                return
+            song_info['stream_url'] = resolved_info['stream_url']
+
         source = discord.PCMVolumeTransformer(
-            discord.FFmpegPCMAudio(audio_url, **FFMPEG_OPTIONS),
-            volume=0.15
+            discord.FFmpegPCMAudio(song_info['stream_url'], **FFMPEG_OPTIONS), 
+            volume=0.20
         )
         
-        ctx.voice_client.play(source, after=after_playing)
-        
-        # Original track announcement (without volume mention)
-        if audio_info.get('is_requested', False):
-            await ctx.send(f"🎵 Now playing: **{audio_info['title']}**")
+        def after_playing(error):
+            if error:
+                logging.error(f'Playback error in guild {guild_id}: {error}')
+            state['is_playing'] = False
+            state['current_song'] = None
+            state['play_next_song_task'] = self.bot.loop.create_task(self.play_next_song(ctx))
+
+        if ctx.voice_client:
+            ctx.voice_client.play(source, after=after_playing)
         else:
-            await ctx.send(
-                f"🎵 Now playing track {audio_info['track_number']}/{audio_info.get('total_tracks', '?')} — "
-                f"**{audio_info['title']}** by **{audio_info['artist']}**"
-            )
+            state['is_playing'] = False
+            return
+
+        embed = discord.Embed(title="🎵 Now Playing", color=discord.Color.blue())
+        if song_info.get('is_requested'):
+            embed.description = f"[{song_info['title']}]({song_info['webpage_url']})\nby {song_info['uploader']}"
+        else:
+            embed.description = (f"Track {song_info['track_number']}/{song_info['total_tracks']}\n"
+                               f"**[{song_info['title']}]({song_info['webpage_url']})** by **{song_info['uploader']}**")
+        await ctx.send(embed=embed)
+
+    @tasks.loop(seconds=60)
+    async def auto_disconnect(self):
+        for guild_id, state in list(self.guild_states.items()):
+            guild = self.bot.get_guild(guild_id)
+            if not guild:
+                if guild_id in self.guild_states: del self.guild_states[guild_id]
+                continue
             
-    except Exception as e:
-        print(f"Playback error: {e}")
-        await play_next(ctx)  # Silent recovery
+            vc = guild.voice_client
+            if vc and len(vc.channel.members) == 1:
+                logging.info(f"Leaving empty channel in guild {guild.name}")
+                await self.cleanup_guild_state(guild_id)
+
+    @auto_disconnect.before_loop
+    async def before_auto_disconnect(self):
+        await self.bot.wait_until_ready()
+
+    async def cleanup_guild_state(self, guild_id: int):
+        state = self.get_guild_state(guild_id)
+        guild = self.bot.get_guild(guild_id)
+
+        if guild and guild.voice_client:
+            await guild.voice_client.disconnect()
+        
+        if state['play_next_song_task']:
+            state['play_next_song_task'].cancel()
+
+        if guild_id in self.guild_states:
+            del self.guild_states[guild_id]
+        logging.info(f"Cleaned up state for guild {guild_id}")
+
+    @commands.command(name='play', help='Plays a song from YouTube or a random track from the playlist.')
+    async def play(self, ctx: commands.Context, *, query: Optional[str] = None):
+        if not ctx.author.voice:
+            return await ctx.send("🚫 You must be in a voice channel to use this command.")
+
+        if not ctx.voice_client:
+            await ctx.author.voice.channel.connect()
+        elif ctx.voice_client.channel != ctx.author.voice.channel:
+            await ctx.voice_client.move_to(ctx.author.voice.channel)
+        
+        state = self.get_guild_state(ctx.guild.id)
+        
+        if query:
+            await ctx.send(f"🔎 Searching for `{query}`...")
+            song_info = await self.get_audio_info(query)
+            if not song_info:
+                return await ctx.send("⚠️ Could not find or process that song.")
+            await state['queue'].put(song_info)
+            await ctx.send(f"✅ Added to queue: **{song_info['title']}**")
+
+        if not state['is_playing']:
+            await self.play_next_song(ctx)
+        elif not query:
+             await ctx.send("🎶 A random song will play after the current queue is finished!")
+
+    @commands.command(name='skip', help='Skips the current song.')
+    async def skip(self, ctx: commands.Context):
+        if not ctx.voice_client or not ctx.voice_client.is_playing():
+            return await ctx.send("I'm not playing anything right now.")
+        
+        ctx.voice_client.stop()
+        await ctx.send("⏭️ Skipped!")
+
+    @commands.command(name='stop', help='Stops playback, clears queue, and disconnects.')
+    async def stop(self, ctx: commands.Context):
+        if not ctx.voice_client:
+            return await ctx.send("I'm not in a voice channel.")
+
+        await self.cleanup_guild_state(ctx.guild.id)
+        await ctx.send("⏹️ Stopped playback and cleared the queue.")
+
+    @commands.command(name='queue', help='Shows the current song queue.')
+    async def queue(self, ctx: commands.Context):
+        state = self.get_guild_state(ctx.guild.id)
+        
+        if state['queue'].empty():
+            return await ctx.send("The queue is empty. A random song will play next.")
+
+        embed = discord.Embed(title="📜 Song Queue", color=discord.Color.purple())
+        queue_list = list(state['queue']._queue)
+        
+        description = ""
+        for i, song in enumerate(queue_list[:10]):
+            description += f"{i+1}. **{song['title']}**\n"
+        
+        if len(queue_list) > 10:
+            description += f"\n...and {len(queue_list) - 10} more."
+            
+        embed.description = description
+        await ctx.send(embed=embed)
+        
+    @commands.command(name='current', aliases=['np'], help='Shows the currently playing song.')
+    async def current(self, ctx: commands.Context):
+        state = self.get_guild_state(ctx.guild.id)
+        song_info = state.get('current_song')
+
+        if not song_info:
+            return await ctx.send("Nothing is currently playing.")
+
+        embed = discord.Embed(title="🔊 Now Playing", color=discord.Color.green())
+        if song_info.get('is_requested'):
+            embed.description = f"[{song_info['title']}]({song_info['webpage_url']})\nby {song_info['uploader']}"
+        else:
+            embed.description = (f"Track {song_info['track_number']}/{song_info['total_tracks']}\n"
+                               f"**[{song_info['title']}]({song_info['webpage_url']})** by **{song_info['uploader']}**")
+        
+        await ctx.send(embed=embed)
+
+    @commands.command(name='addsong', help='Adds a song to the CSV playlist. Format: !addsong <url> <Title> by <Artist>')
+    @commands.has_permissions(manage_guild=True)
+    async def addsong(self, ctx: commands.Context, url: str, *, details: str):
+        try:
+            if " by " in details:
+                title, artist = details.rsplit(" by ", 1)
+            else:
+                title = details
+                artist = "Unknown Artist"
+
+            url = url.strip()
+            title = title.strip()
+            artist = artist.strip()
+
+            new_song = {
+                'url': url,
+                'title': title,
+                'artist': artist,
+                'track_number': len(self.playlist_cache) + 1
+            }
+
+            with open(PLAYLIST_FILE, 'a', newline='', encoding='utf-8') as file:
+                writer = csv.writer(file)
+                writer.writerow([url, title, artist])
+
+            self.playlist_cache.append(new_song)
+            await ctx.send(f"✅ Added **{title}** by **{artist}** to the playlist!\n*Note: It will be included in the next playlist shuffle cycle.*")
+
+        except Exception as e:
+            await ctx.send(f"⚠️ Error adding song: {e}. Please use the format `!addsong <url> <Title> by <Artist>`")
+
+    @commands.command(name='showplaylist', help='Shows all songs in the predefined playlist.')
+    async def showplaylist(self, ctx: commands.Context):
+        if not self.playlist_cache:
+            return await ctx.send("The playlist is empty.")
+
+        embed = discord.Embed(title=f"🎵 Playlist ({len(self.playlist_cache)} songs)", color=discord.Color.gold())
+        
+        pages = []
+        current_page = ""
+        for song in self.playlist_cache:
+            line = f"**{song['track_number']}.** {song['title']} by {song['artist']}\n"
+            if len(current_page) + len(line) > 1024:
+                pages.append(current_page)
+                current_page = ""
+            current_page += line
+        pages.append(current_page)
+
+        for i, page_content in enumerate(pages):
+            embed.add_field(name=f"Page {i+1}", value=page_content, inline=False)
+        
+        await ctx.send(embed=embed)
 
 @bot.event
 async def on_ready():
-    print(f'Logged in as {bot.user} (ID: {bot.user.id})')
-    print('------')
-    # Start the background task for checking empty voice channels
-    bot.loop.create_task(check_empty_voice_channels())
-
-async def check_empty_voice_channels():
-    """Background task to check for empty voice channels"""
-    await bot.wait_until_ready()
-    while not bot.is_closed():
-        await asyncio.sleep(60)  # Check every 60 seconds
-        
-        for voice_client in bot.voice_clients:
-            # Check if there's only the bot in the voice channel
-            if len(voice_client.channel.members) == 1:
-                await voice_client.disconnect()
-                song_queue = asyncio.Queue()  # Clear the queue
-                print("Left voice channel due to inactivity")
-
-@bot.command()
-async def play(ctx, *, query=None):
-    """Play a song or random track"""
-    if not ctx.author.voice:
-        return await ctx.send("🚫 You must be in a voice channel!")
-
-    # Connect to voice channel
-    if not ctx.voice_client:
-        await ctx.author.voice.channel.connect()
-    elif ctx.voice_client.channel != ctx.author.voice.channel:
-        await ctx.voice_client.move_to(ctx.author.voice.channel)
-
-    # Play random if no query provided
-    if not query:
-        await play_random_song(ctx)
-        return
-
-    # Add to queue
-    audio_info = await get_audio_info(query, is_requested=True)
-    if audio_info:
-        await song_queue.put(audio_info)
-        if not ctx.voice_client.is_playing():
-            await play_next(ctx)
-        else:
-            await ctx.send(f"➕ Added to queue: **{audio_info['title']}**")
-    else:
-        await ctx.send("⚠️ Couldn't find that song!")
-
-@bot.command()
-async def skip(ctx):
-    """Skip the current song"""
-    if ctx.voice_client and ctx.voice_client.is_playing():
-        ctx.voice_client.stop()
-        await ctx.send("⏭️ Skipped current song")
-    else:
-        await ctx.send("No song is currently playing!")
-
-@bot.command()
-async def stop(ctx):
-    """Stop the bot and clear the queue"""
-    if ctx.voice_client:
-        await ctx.voice_client.disconnect()
-        song_queue = asyncio.Queue()  # Reset queue
-        await ctx.send("⏹️ Stopped playback and cleared queue")
-    else:
-        await ctx.send("I'm not in a voice channel!")
-
-@bot.command()
-async def current(ctx):
-    """Show the currently playing track"""
-    if ctx.voice_client and ctx.voice_client.is_playing():
-        await ctx.send(f"🔊 Currently playing track {current_track_number}")
-    else:
-        await ctx.send("No song is currently playing!")
-
-@bot.command()
-async def queue(ctx):
-    """Show the current queue"""
-    if song_queue.empty():
-        return await ctx.send("The queue is empty! I'll play a random song next.")
-    
-    # Note: This is a simple implementation. For a full queue list, you'd need to track songs differently
-    await ctx.send("There are songs in the queue. Currently playing the next one.")
-
-@bot.command()
-async def addsong(ctx, url: str, title: str, artist: str):
-    """Add a song to the predefined list (admin only)"""
-    # Add permission check if you want
-    try:
-        # Strip whitespace from inputs
-        url = url.strip()
-        title = title.strip()
-        artist = artist.strip()
-        
-        with open('playlist.csv', 'a', newline='', encoding='utf-8') as csvfile:
-            writer = csv.writer(csvfile)
-            writer.writerow([url, title, artist])
-        await ctx.send(f"Added **{title}** by **{artist}** to the playlist!")
-    except Exception as e:
-        await ctx.send(f"⚠️ Error adding song: {e}")
-
-@bot.command()
-async def showplaylist(ctx):
-    """Show all songs in the predefined playlist"""
-    try:
-        with open('playlist.csv', 'r', newline='', encoding='utf-8') as csvfile:
-            reader = csv.reader(csvfile)
-            header = next(reader)  # Skip header
-            playlist = [strip_whitespace(row) for row in reader if row]  # Read and clean all rows
-            
-        if not playlist:
-            await ctx.send("The playlist is currently empty.")
-            return
-        
-        playlist_text = "\n".join(
-            f"{i+1}. {row[1] if len(row) > 1 else 'Unknown Track'} by "
-            f"{row[2] if len(row) > 2 else 'Unknown Artist'}"
-            for i, row in enumerate(playlist)
-        )
-        await ctx.send(f"🎵 Playlist (Total: {len(playlist)} songs):\n{playlist_text}")
-    except FileNotFoundError:
-        await ctx.send("The playlist file doesn't exist yet!")
-    except Exception as e:
-        await ctx.send(f"⚠️ Error loading playlist: {e}")
+    logging.info(f'Logged in as {bot.user} (ID: {bot.user.id})')
+    logging.info('------')
+    await bot.add_cog(MusicCog(bot))
 
 bot.run(YOUR_BOT_TOKEN_HERE)
