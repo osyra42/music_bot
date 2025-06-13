@@ -6,8 +6,6 @@ import random
 import csv
 import os
 import logging
-import ssl
-import os
 from typing import Dict, List, Optional, Any
 #from dotenv import load_dotenv
 from secret import YOUR_BOT_TOKEN_HERE
@@ -39,12 +37,6 @@ YTDL_OPTIONS = {
     'no_warnings': True,
     'default_search': 'ytsearch',
     'source_address': '0.0.0.0',
-    'socket_timeout': 15,  # Increase socket timeout
-    'http_headers': {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
-        'Accept': '*/*',
-        'Connection': 'keep-alive'
-    }
 }
 
 FFMPEG_OPTIONS = {
@@ -110,34 +102,22 @@ class MusicCog(commands.Cog):
         self.auto_disconnect.cancel()
 
     async def get_audio_info(self, query: str) -> Optional[Dict[str, Any]]:
-        max_retries = 3
-        retry_delay = 2  # seconds
-        
-        for attempt in range(max_retries):
-            try:
-                with yt_dlp.YoutubeDL(YTDL_OPTIONS) as ydl:
-                    info = ydl.extract_info(query, download=False)
-                    if 'entries' in info:
-                        info = info['entries'][0]
-                    
-                    return {
-                        'stream_url': info['url'],
-                        'title': info.get('title', 'Unknown Title'),
-                        'uploader': info.get('uploader', 'Unknown Artist'),
-                        'webpage_url': info.get('webpage_url', query),
-                        'is_requested': True
-                    }
-            except (ssl.SSLError, TimeoutError, ConnectionError) as e:
-                logging.warning(f"Network error (attempt {attempt+1}/{max_retries}) for '{query}': {e}")
-                if attempt < max_retries - 1:
-                    await asyncio.sleep(retry_delay)
-                    retry_delay *= 2  # Exponential backoff
-                else:
-                    logging.error(f"Failed to fetch audio info after {max_retries} attempts: {e}")
-                    return None
-            except Exception as e:
-                logging.error(f"Error fetching audio info for '{query}': {e}")
-                return None
+        try:
+            with yt_dlp.YoutubeDL(YTDL_OPTIONS) as ydl:
+                info = ydl.extract_info(query, download=False)
+                if 'entries' in info:
+                    info = info['entries'][0]
+                
+                return {
+                    'stream_url': info['url'],
+                    'title': info.get('title', 'Unknown Title'),
+                    'uploader': info.get('uploader', 'Unknown Artist'),
+                    'webpage_url': info.get('webpage_url', query),
+                    'is_requested': True
+                }
+        except Exception as e:
+            logging.error(f"Error fetching audio info for '{query}': {e}")
+            return None
 
     def get_next_shuffled_song(self, guild_id: int) -> Optional[Dict[str, Any]]:
         if not self.playlist_cache:
